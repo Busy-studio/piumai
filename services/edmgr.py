@@ -48,10 +48,33 @@ def _safe_response_message(resp: requests.Response) -> str:
     return text[:500] + ("..." if len(text) > 500 else "")
 
 
-def _post_once(url: str, payload: dict, content_mode: str) -> requests.Response:
-    api_key = get_secret("EDMGR_API_KEY")
+def _api_key_for_url(url: str) -> tuple[str | None, str]:
+    """Use the API key issued for each university-disclosure service.
+
+    EDMGR_API_KEY is kept only as a backwards-compatible fallback for an
+    existing deployment that previously used one shared key.
+    """
+    if url == PATENT_API_URL:
+        secret_name = "EDMGR_PATENT_API_KEY"
+        label = "특허출원및등록실적"
+    elif url == TRANSFER_API_URL:
+        secret_name = "EDMGR_TRANSFER_API_KEY"
+        label = "기술이전수입료및계약실적"
+    else:
+        secret_name = "EDMGR_API_KEY"
+        label = "대학정보공시"
+
+    api_key = get_secret(secret_name) or get_secret("EDMGR_API_KEY")
     if not api_key:
-        raise ValueError("EDMGR_API_KEY가 설정되지 않았습니다.")
+        raise ValueError(
+            f"{label} OpenAPI 인증키가 설정되지 않았습니다. "
+            f"Streamlit Secrets에 {secret_name}를 설정해 주세요."
+        )
+    return api_key, secret_name
+
+
+def _post_once(url: str, payload: dict, content_mode: str) -> requests.Response:
+    api_key, _ = _api_key_for_url(url)
 
     headers = {"Accept": "application/json"}
     body = dict(payload)
