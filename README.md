@@ -21,7 +21,11 @@ Streamlit Cloud의 **App settings → Secrets**에 아래 값을 넣습니다.
 
 ```toml
 OPENAI_API_KEY = "sk-..."
-EDMGR_API_KEY = "..."
+
+# 대학정보공시 OpenAPI는 서비스별 발급키를 각각 입력
+EDMGR_PATENT_API_KEY = "..."   # 특허출원및등록실적 SA00202500062
+EDMGR_TRANSFER_API_KEY = "..." # 기술이전수입료및계약실적 SA00202500061
+
 KIPRIS_API_KEY = "..." # 선택: 없어도 앱은 실행되며 Google Patents 웹검색으로 fallback
 
 OPENAI_MODEL = "gpt-5.6-luna"
@@ -34,6 +38,8 @@ DEFAULT_YEAR = "2025"
 
 `KIPRIS_API_KEY`가 없으면 KIPRIS route가 필요한 질문도 앱이 중단되지 않고 Google Patents 웹검색으로 대체합니다.
 
+기존 테스트 배포에서 `EDMGR_API_KEY` 하나를 사용하고 있었다면 하위 호환 fallback으로는 동작하지만, 실제 운영에서는 위의 두 서비스별 키를 각각 입력하는 것을 권장합니다.
+
 ## 로컬 실행
 
 ```bash
@@ -44,6 +50,8 @@ streamlit run app.py
 ## 데이터 사용 원칙
 
 - 대학정보공시 통계 숫자는 OpenAPI 결과만 사용합니다.
+- 특허 통계 질문은 특허출원및등록실적 API만, 기술이전 질문은 기술이전수입료및계약실적 API만 호출합니다.
+- 두 지표의 상관/비교처럼 둘 다 필요한 질문에서만 두 API를 함께 호출합니다.
 - Google Patents/Web Search는 탐색·동향·관련 특허/문헌에 사용합니다.
 - KIPRIS Plus는 정확한 한국 특허 공식 확인에 우선 사용하며, 불필요한 호출을 줄이도록 라우팅합니다.
 - 서비스 범위를 벗어난 질문은 차단합니다.
