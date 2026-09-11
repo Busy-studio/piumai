@@ -20,10 +20,7 @@ def client() -> OpenAI:
 PLAN_SCHEMA = {
     "type": "object",
     "properties": {
-        "route": {
-            "type": "string",
-            "enum": ["stats", "knowledge", "patent_web", "web", "kipris", "reject"],
-        },
+        "route": {"type": "string", "enum": ["stats", "knowledge", "patent_web", "web", "kipris", "reject"]},
         "reason": {"type": "string"},
         "stats_source": {"type": "string", "enum": ["patent", "transfer", "both", "none"]},
         "years": {"type": "array", "items": {"type": "integer"}},
@@ -31,19 +28,13 @@ PLAN_SCHEMA = {
         "region_scope": {"type": "string"},
         "metric": {"type": "string", "enum": ALL_METRICS + ["__all__"]},
         "metric2": {"type": "string", "enum": ALL_METRICS + ["__none__"]},
-        "analysis_type": {
-            "type": "string",
-            "enum": ["lookup", "ranking", "trend", "compare", "correlation", "summary", "explain"],
-        },
+        "analysis_type": {"type": "string", "enum": ["lookup", "ranking", "trend", "compare", "correlation", "summary", "explain"]},
         "output_type": {"type": "string", "enum": ["auto", "text", "table", "bar", "line", "scatter"]},
         "top_n": {"type": "integer", "minimum": 1, "maximum": 100},
         "kipris_word": {"type": "string"},
         "kipris_applicant": {"type": "string"},
         "kipris_application_number": {"type": "string"},
-        "kipris_status": {
-            "type": "string",
-            "enum": ["all", "published", "withdrawn", "expired", "abandoned", "invalid", "rejected", "registered"],
-        },
+        "kipris_status": {"type": "string", "enum": ["all", "published", "withdrawn", "expired", "abandoned", "invalid", "rejected", "registered"]},
     },
     "required": [
         "route", "reason", "stats_source", "years", "schools", "region_scope", "metric", "metric2",
@@ -58,21 +49,21 @@ PLANNER_INSTRUCTIONS = '''
 
 도구 우선순위와 route:
 1) knowledge: 최신 데이터나 정확한 외부 수치가 필요 없는 개념/방법/해석. 외부 조회 금지.
-2) stats: 대학정보공시의 실제 대학별 특허 출원/등록 건수, 기술이전 계약건수, 기술이전수입료, 순위/추이/비교/상관. 숫자는 반드시 API로 조회.
+2) stats: 대학정보공시의 실제 대학별 특허 출원/등록 건수, 기술이전 계약건수, 기술이전수입료, 순위/추이/비교/상관.
+   - years는 대학정보공시 API의 조사연도 exmnYr 기준이다.
    - 특허 지표만 묻으면 stats_source=patent
    - 기술이전 지표만 묻으면 stats_source=transfer
    - 두 분야 관계/비교일 때만 both
 3) patent_web: 관련 특허나 특허와 연계된 논문/선행기술을 탐색하는 질문. Google Patents 중심 웹검색을 사용.
 4) web: 최신 기업/시장/정책/기술동향/일반 논문 등 공개 웹 정보가 필요한 질문.
 5) kipris: 한국 특허의 정확한 공식 확인이 필요한 경우에만 사용. KIPRIS 호출량은 제한되어 있으므로 최후순위다.
-   예: 정확한 국내 등록특허 건수, 특정 한국 특허의 현재 상태, 공식 출원/등록번호 검증, 사용자가 KIPRIS 기준을 명시.
 6) reject: 서비스 범위와 관계없는 질문.
 
 중요 구분:
-- "부산대학교 2025년 국내특허 등록건수" → stats
-- "부산대학교 산학협력단이 현재 보유한 등록특허 정확히 몇 건" → kipris, applicant를 가능한 정확한 명칭으로 넣고 status=registered
+- "부산대학교 2025년 국내특허 등록건수" → stats, years=[2025]. 이 2025는 조사연도 exmnYr다.
+- 실제 응답의 aplcnYr는 적용연도로 별도 값일 수 있다. 예: exmnYr=2025, aplcnYr=2024.
+- "부산대학교 산학협력단이 현재 보유한 등록특허 정확히 몇 건" → kipris, status=registered
 - "부산대 배터리 관련 특허 찾아줘" → patent_web
-- "관련 논문도 찾아줘"가 앞 대화의 특허 탐색을 이어가면 patent_web
 - "특허 출원과 등록 차이" → knowledge
 
 질문에 연도가 없으면 years=[]로 둔다. 일반 stats 기본 연도는 애플리케이션이 정한다.
@@ -82,13 +73,10 @@ PLANNER_INSTRUCTIONS = '''
 
 
 def _recent_history(history: list[dict], limit: int = 8) -> list[dict]:
-    compact = []
-    for msg in history[-limit:]:
-        compact.append({
-            "role": msg.get("role", "user"),
-            "content": str(msg.get("content", ""))[:2500],
-        })
-    return compact
+    return [
+        {"role": msg.get("role", "user"), "content": str(msg.get("content", ""))[:2500]}
+        for msg in history[-limit:]
+    ]
 
 
 def plan_question(question: str, history: list[dict]) -> dict:
@@ -97,14 +85,7 @@ def plan_question(question: str, history: list[dict]) -> dict:
         model=OPENAI_MODEL,
         instructions=PLANNER_INSTRUCTIONS,
         input=json.dumps(payload, ensure_ascii=False),
-        text={
-            "format": {
-                "type": "json_schema",
-                "name": "pium_ai_route_plan",
-                "strict": True,
-                "schema": PLAN_SCHEMA,
-            }
-        },
+        text={"format": {"type": "json_schema", "name": "pium_ai_route_plan", "strict": True, "schema": PLAN_SCHEMA}},
         store=False,
     )
     return json.loads(resp.output_text)
@@ -130,14 +111,7 @@ def resolve_region(region_scope: str, available_schools: list[str]) -> tuple[lis
             "모르면 포함하지 않는다. 부산·울산·경남·부울경·동남권 같은 권역도 처리한다."
         ),
         input=json.dumps(payload, ensure_ascii=False),
-        text={
-            "format": {
-                "type": "json_schema",
-                "name": "region_resolution",
-                "strict": True,
-                "schema": REGION_SCHEMA,
-            }
-        },
+        text={"format": {"type": "json_schema", "name": "region_resolution", "strict": True, "schema": REGION_SCHEMA}},
         store=False,
     )
     parsed = json.loads(resp.output_text)
@@ -151,8 +125,7 @@ def knowledge_answer(question: str, history: list[dict]) -> str:
         model=OPENAI_MODEL,
         instructions=(
             "너는 PIUM AI다. 대학 특허·기술이전·연구성과·기술사업화 분야 질문에 한국어로 직접 답한다. "
-            "특정 대학/연도의 실제 통계 수치를 조회하지 않은 상태에서 숫자를 추정하지 않는다. "
-            "대화 맥락을 이어서 답한다."
+            "특정 대학/연도의 실제 통계 수치를 조회하지 않은 상태에서 숫자를 추정하지 않는다. 대화 맥락을 이어서 답한다."
         ),
         input=json.dumps(payload, ensure_ascii=False),
         store=False,
@@ -172,6 +145,7 @@ def stats_answer(question: str, plan: dict, records: list[dict], metadata: dict,
         model=OPENAI_MODEL,
         instructions=(
             "너는 PIUM AI다. 현재는 대학정보공시 통계 답변이다. 수치·순위·증감·비교는 오직 data_json 값만 사용한다. "
+            "exmnYr는 조사연도이고 aplcnYr는 적용연도다. 둘이 다르면 반드시 '조사연도 2025(적용연도 2024)'처럼 구분해서 표현한다. "
             "없는 숫자를 만들거나 모델 기억으로 보완하지 않는다. 짧고 명확하게 답하고 기준 연도와 지표를 밝혀라."
         ),
         input=json.dumps(payload, ensure_ascii=False, default=str),
@@ -198,8 +172,7 @@ def _collect_urls(obj: Any, out: dict[str, str]):
     if isinstance(obj, dict):
         url = obj.get("url")
         if isinstance(url, str) and url.startswith("http"):
-            title = obj.get("title") or obj.get("text") or url
-            out[url] = str(title)
+            out[url] = str(obj.get("title") or obj.get("text") or url)
         for value in obj.values():
             _collect_urls(value, out)
     elif isinstance(obj, list):
