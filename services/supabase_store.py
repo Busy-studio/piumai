@@ -15,10 +15,12 @@ PATENT_TABLE = "university_patent_stats"
 TRANSFER_TABLE = "university_transfer_stats"
 SYNC_TABLE = "university_disclosure_sync"
 
+# DB year is the requested survey year(exmnYr). application_year stores aplcnYr.
 PATENT_DB_TO_API = {
     "school_name": "schlNm",
     "branch_yn": "brncYn",
-    "year": "aplcnYr",
+    "year": "exmnYr",
+    "application_year": "aplcnYr",
     "domestic_patent_applications": "dmstPtntApplNocs",
     "domestic_patent_registrations": "dmstPtntRegNocs",
     "overseas_patent_applications": "ovrsPtntApplNocs",
@@ -27,11 +29,11 @@ PATENT_DB_TO_API = {
 TRANSFER_DB_TO_API = {
     "school_name": "schlNm",
     "branch_yn": "brncYn",
-    "year": "aplcnYr",
+    "year": "exmnYr",
+    "application_year": "aplcnYr",
     "transfer_contracts": "ctrtNocs",
     "transfer_income": "techBfrImpfAmt",
 }
-
 API_TO_PATENT_DB = {v: k for k, v in PATENT_DB_TO_API.items()}
 API_TO_TRANSFER_DB = {v: k for k, v in TRANSFER_DB_TO_API.items()}
 
@@ -65,23 +67,14 @@ def is_configured() -> bool:
 
 
 def _base_url() -> str:
-    """Return only the Supabase project origin.
-
-    Accepts either the project URL (https://<ref>.supabase.co) or a Data API URL
-    accidentally copied with /rest/v1 appended. This prevents paths such as
-    /rest/v1/rest/v1/<table>, which PostgREST rejects with PGRST125.
-    """
     raw = (get_secret("SUPABASE_URL") or "").strip()
     if not raw:
         raise ValueError("SUPABASE_URL이 설정되지 않았습니다.")
-
     if not raw.startswith(("http://", "https://")):
         raw = "https://" + raw
-
     parts = urlsplit(raw)
     if not parts.netloc:
         raise ValueError("SUPABASE_URL 형식이 올바르지 않습니다.")
-
     return urlunsplit((parts.scheme or "https", parts.netloc, "", "", "")).rstrip("/")
 
 
@@ -113,8 +106,9 @@ def _table_url(table: str) -> str:
 def _raise(resp: requests.Response, action: str) -> None:
     if resp.ok:
         return
-    preview = (resp.text or "")[:500]
-    raise RuntimeError(f"Supabase {action} 실패: HTTP {resp.status_code} / {preview}")
+    raise RuntimeError(
+        f"Supabase {action} 실패: HTTP {resp.status_code} / {(resp.text or '')[:500]}"
+    )
 
 
 def _select_all(table: str, *, params: dict | None = None) -> list[dict]:
@@ -137,9 +131,8 @@ def _bulk_insert(table: str, rows: list[dict]) -> int:
     if not rows:
         return 0
     inserted = 0
-    chunk_size = 500
-    for start in range(0, len(rows), chunk_size):
-        chunk = rows[start:start + chunk_size]
+    for start in range(0, len(rows), 500):
+        chunk = rows[start:start + 500]
         resp = requests.post(
             _table_url(table),
             headers=_headers({"Prefer": "return=minimal"}),
@@ -155,14 +148,12 @@ def _bulk_upsert(table: str, rows: list[dict]) -> int:
     if not rows:
         return 0
     written = 0
-    chunk_size = 500
-    params = {"on_conflict": "school_name,branch_yn,year"}
-    for start in range(0, len(rows), chunk_size):
-        chunk = rows[start:start + chunk_size]
+    for start in range(0, len(rows), 500):
+        chunk = rows[start:start + 500]
         resp = requests.post(
             _table_url(table),
             headers=_headers({"Prefer": "resolution=merge-duplicates,return=minimal"}),
-            params=params,
+            params={"on_conflict": "school_name,branch_yn,year"},
             json=chunk,
             timeout=90,
         )
@@ -234,6 +225,8 @@ def _frame_to_db_rows(df: pd.DataFrame, mapping: dict[str, str]) -> list[dict]:
         cleaned["school_name"] = str(cleaned["school_name"]).strip()
         cleaned["branch_yn"] = str(cleaned.get("branch_yn") or "").strip()
         cleaned["year"] = int(float(cleaned["year"]))
+        if cleaned.get("application_year") not in (None, ""):
+            cleaned["application_year"] = int(float(cleaned["application_year"]))
         rows.append(cleaned)
     return rows
 
@@ -242,16 +235,19 @@ def _existing_keys(table: str, years: Iterable[int]) -> set[tuple[str, str, int]
     years = sorted({int(y) for y in years})
     if not years:
         return set()
-    year_filter = ",".join(str(y) for y in years)
     rows = _select_all(
         table,
         params={
             "select": "school_name,branch_yn,year",
-            "year": f"in.({year_filter})",
+            "year": f"in.({','.join(str(y) for y in years)})",
         },
     )
     return {
-        (str(r.get("school_name") or "").strip(), str(r.get("branch_yn") or "").strip(), int(r["year"]))
+        (
+            str(r.get("school_name") or "").strip(),
+            str(r.get("branch_yn") or "").strip(),
+            int(r["year"]),
+        )
         for r in rows
         if r.get("year") is not None
     }
@@ -269,11 +265,6 @@ def _insert_missing_rows(table: str, rows: list[dict]) -> int:
 
 
 def sync_years(years: Iterable[int], *, force: bool = False) -> dict:
-    """Store selected EDMGR years in Supabase.
-
-    force=False: already completed source/year snapshots are skipped and existing rows are never overwritten.
-    force=True: selected years are refreshed with UPSERT. Admin use only.
-    """
     if not is_configured():
         raise ValueError("Supabase 설정이 없습니다.")
 
@@ -293,8 +284,7 @@ def sync_years(years: Iterable[int], *, force: bool = False) -> dict:
     ):
         done = synced_years(source) if not force else set()
         targets = [y for y in years if force or y not in done]
-        skipped = [y for y in years if not force and y in done]
-        getattr(report, skipped_attr).extend(skipped)
+        getattr(report, skipped_attr).extend([y for y in years if not force and y in done])
         if not targets:
             continue
 
@@ -329,12 +319,11 @@ def _load_table(table: str, years: Iterable[int], mapping: dict[str, str]) -> pd
     years = sorted({int(y) for y in years})
     if not years:
         return pd.DataFrame(columns=list(mapping.values()))
-    year_filter = ",".join(str(y) for y in years)
     rows = _select_all(
         table,
         params={
             "select": ",".join(mapping.keys()),
-            "year": f"in.({year_filter})",
+            "year": f"in.({','.join(str(y) for y in years)})",
             "order": "year.asc,school_name.asc",
         },
     )
@@ -344,13 +333,11 @@ def _load_table(table: str, years: Iterable[int], mapping: dict[str, str]) -> pd
 
 
 def load_stats(years: Iterable[int], source: str) -> tuple[pd.DataFrame, list[tuple[int, str]]]:
-    """Load chatbot statistical data from Supabase with the original EDMGR field names."""
     if not is_configured():
         raise ValueError("Supabase 설정이 없습니다.")
 
     years = sorted({int(y) for y in years})
     errors: list[tuple[int, str]] = []
-
     if source == "patent":
         out = _load_table(PATENT_TABLE, years, PATENT_DB_TO_API)
     elif source == "transfer":
@@ -358,12 +345,16 @@ def load_stats(years: Iterable[int], source: str) -> tuple[pd.DataFrame, list[tu
     elif source == "both":
         p = _load_table(PATENT_TABLE, years, PATENT_DB_TO_API)
         t = _load_table(TRANSFER_TABLE, years, TRANSFER_DB_TO_API)
-        out = pd.merge(p, t, on=["schlNm", "brncYn", "aplcnYr"], how="outer")
+        out = pd.merge(
+            p,
+            t,
+            on=["exmnYr", "schlNm", "brncYn", "aplcnYr"],
+            how="outer",
+        )
     else:
         raise ValueError(f"지원하지 않는 데이터원: {source}")
 
     if out.empty:
         for year in years:
-            errors.append((year, "Supabase에 해당 연도 데이터가 없습니다. 관리자 동기화가 필요합니다."))
-
+            errors.append((year, "Supabase에 해당 조사연도 데이터가 없습니다. 관리자 동기화가 필요합니다."))
     return out.drop_duplicates().reset_index(drop=True), errors
