@@ -49,7 +49,6 @@ def _safe_response_message(resp: requests.Response) -> str:
 
 
 def _api_key_for_url(url: str) -> tuple[str, str, str]:
-    """Return service-specific key, its secret name, and a human label."""
     if url == PATENT_API_URL:
         secret_name = "EDMGR_PATENT_API_KEY"
         label = "특허출원및등록실적"
@@ -60,7 +59,6 @@ def _api_key_for_url(url: str) -> tuple[str, str, str]:
         secret_name = "EDMGR_API_KEY"
         label = "대학정보공시"
 
-    # Keep the old shared key only as a compatibility fallback.
     api_key = get_secret(secret_name) or get_secret("EDMGR_API_KEY")
     if not api_key:
         raise ValueError(
@@ -101,53 +99,6 @@ def _post_once(
     return requests.post(url, headers=headers, data=body, timeout=60)
 
 
-@lru_cache(maxsize=128)
-def _call_edmgr_cached(url: str, year: int):
-    payload = {"exmnYr": str(year)}
-    _, secret_name, label = _api_key_for_url(url)
-    attempts: list[str] = []
-    last_resp: requests.Response | None = None
-
-    for auth_mode in _auth_modes():
-        resp = _post_once(url, payload, "json", auth_mode)
-        attempts.append(f"{auth_mode}/json:{resp.status_code}")
-
-        # Some EDMGR services accept form body instead of JSON.
-        if resp.status_code in {400, 404, 405, 415, 422}:
-            retry = _post_once(url, payload, "form", auth_mode)
-            attempts.append(f"{auth_mode}/form:{retry.status_code}")
-            if retry.ok:
-                resp = retry
-
-        if resp.ok:
-            try:
-                return resp.json()
-            except Exception as exc:
-                raise RuntimeError(
-                    f"{label} API 응답을 JSON으로 해석하지 못했습니다. "
-                    f"응답: {_safe_response_message(resp)}"
-                ) from exc
-
-        last_resp = resp
-        # Authentication failure: try the next supported placement of the key.
-        if resp.status_code in {401, 403}:
-            continue
-
-        # For request-format failures, trying the remaining auth placements may still help.
-        if resp.status_code in {400, 404, 405, 415, 422}:
-            continue
-
-        break
-
-    status = last_resp.status_code if last_resp is not None else "unknown"
-    detail = _safe_response_message(last_resp) if last_resp is not None else "응답 없음"
-    raise RuntimeError(
-        f"{label} API 호출 실패 (HTTP {status}). "
-        f"사용 키: {secret_name}. 인증 시도: {', '.join(attempts)}. "
-        f"서버 응답: {detail}"
-    )
-
-
 def _find_best_record_list(obj, expected_keys):
     candidates = []
     expected = set(expected_keys)
@@ -172,6 +123,55 @@ def _find_best_record_list(obj, expected_keys):
         return [], None
     candidates.sort(key=lambda t: (t[0], t[1]), reverse=True)
     return candidates[0][3], candidates[0][2]
+
+
+@lru_cache(maxsize=128)
+def _call_edmgr_cached(url: str, year: int, expected_keys: tuple[str, ...]):
+    payload = {"exmnYr": str(year)}
+    _, secret_name, label = _api_key_for_url(url)
+    attempts: list[str] = []
+    last_resp: requests.Response | None = None
+    last_json = None
+
+    for auth_mode in _auth_modes():
+        for content_mode in ("json", "form"):
+            resp = _post_once(url, payload, content_mode, auth_mode)
+            attempts.append(f"{auth_mode}/{content_mode}:{resp.status_code}")
+            last_resp = resp
+
+            if not resp.ok:
+                # Try the next request representation/auth placement only for
+                # likely auth or request-format failures.
+                if resp.status_code in {400, 401, 403, 404, 405, 415, 422}:
+                    continue
+                break
+
+            try:
+                parsed = resp.json()
+            except Exception:
+                # A 200 response without JSON is not a usable API success.
+                continue
+
+            last_json = parsed
+            rows, _ = _find_best_record_list(parsed, expected_keys)
+            if rows:
+                return parsed
+
+            # Some public APIs return HTTP 200 even when authentication/body
+            # validation failed. Continue and try the other supported modes.
+            continue
+
+    status = last_resp.status_code if last_resp is not None else "unknown"
+    response_preview = (
+        str(last_json)[:500]
+        if last_json is not None
+        else (_safe_response_message(last_resp) if last_resp is not None else "응답 없음")
+    )
+    raise RuntimeError(
+        f"{label} API 호출 실패 (HTTP {status}). "
+        f"사용 키: {secret_name}. 인증/요청 시도: {', '.join(attempts)}. "
+        f"응답 미리보기: {response_preview}"
+    )
 
 
 def _numeric_series(series: pd.Series) -> pd.Series:
@@ -207,19 +207,21 @@ def _normalize(raw, expected_columns, source_name: str) -> pd.DataFrame:
 
 
 def fetch_patent(year: int) -> pd.DataFrame:
-    return _normalize(
-        _call_edmgr_cached(PATENT_API_URL, int(year)),
-        PATENT_COLUMNS,
-        "특허출원및등록실적[대학정보공시]",
+    raw = _call_edmgr_cached(
+        PATENT_API_URL,
+        int(year),
+        tuple(PATENT_COLUMNS.keys()),
     )
+    return _normalize(raw, PATENT_COLUMNS, "특허출원및등록실적[대학정보공시]")
 
 
 def fetch_transfer(year: int) -> pd.DataFrame:
-    return _normalize(
-        _call_edmgr_cached(TRANSFER_API_URL, int(year)),
-        TRANSFER_COLUMNS,
-        "기술이전수입료및계약실적[대학정보공시]",
+    raw = _call_edmgr_cached(
+        TRANSFER_API_URL,
+        int(year),
+        tuple(TRANSFER_COLUMNS.keys()),
     )
+    return _normalize(raw, TRANSFER_COLUMNS, "기술이전수입료및계약실적[대학정보공시]")
 
 
 def fetch_years(years: Iterable[int], source: str) -> tuple[pd.DataFrame, list[tuple[int, str]]]:
