@@ -22,12 +22,12 @@ Streamlit Cloud의 **App settings → Secrets**에 아래 값을 넣습니다.
 ```toml
 OPENAI_API_KEY = "sk-..."
 
-# 교육데이터플랫폼의 '이용신청결과'에서 승인완료된 각 API의 End Point와 인증키를 그대로 입력
-EDMGR_PATENT_API_URL = "https://openapi.edmgr.kr/openAPI/service/SA00202500062"
-EDMGR_PATENT_API_KEY = "..."      # 특허출원및등록실적[대학정보공시]
+# 교육데이터플랫폼 공통 인증키
+EDMGR_API_KEY = "..."
 
+# 서비스별 End Point
+EDMGR_PATENT_API_URL = "https://openapi.edmgr.kr/openAPI/service/SA00202500062"
 EDMGR_TRANSFER_API_URL = "https://openapi.edmgr.kr/openAPI/service/SA00202500061"
-EDMGR_TRANSFER_API_KEY = "..."    # 기술이전수입료및계약실적[대학정보공시]
 
 KIPRIS_API_KEY = "..." # 선택: 없어도 앱은 실행되며 Google Patents 웹검색으로 fallback
 
@@ -39,13 +39,14 @@ EDMGR_AUTH_MODE = "header"
 DEFAULT_YEAR = "2025"
 ```
 
-### 교육데이터플랫폼 API 주의
+### 교육데이터플랫폼 API 구조
 
-- 특허 API와 기술이전 API는 서로 다른 서비스입니다.
-- 승인완료된 API 이용신청 건마다 **End Point(URL) + 인증키**를 한 쌍으로 확인해 입력합니다.
-- `HTTP 404`와 `{"loc":"PROVIDER","message":"Not Found"}`가 함께 나오면, 키가 전달된 뒤 provider 라우팅 단계에서 실패한 것이므로 **해당 승인건의 End Point와 인증키 조합**, 승인 상태, 서비스 활성화 여부를 먼저 확인합니다.
-- `HTTP 401`은 인증키 전달 방식 또는 인증키 자체를 우선 확인합니다.
-- 기존 테스트 배포의 `EDMGR_API_KEY` 하나는 하위 호환 fallback으로만 지원합니다.
+- 특허출원및등록실적: `SA00202500062`
+- 기술이전수입료및계약실적: `SA00202500061`
+- 두 서비스는 동일한 `EDMGR_API_KEY`를 사용하고 End Point만 구분합니다.
+- 기존의 `EDMGR_PATENT_API_KEY`, `EDMGR_TRANSFER_API_KEY`는 호환용 fallback으로만 남겨뒀습니다.
+- `HTTP 404`와 `{"loc":"PROVIDER","message":"Not Found"}`가 함께 나오면 인증키가 전달된 뒤 provider 라우팅 단계에서 실패한 것이므로 승인정보의 End Point/서비스 활성화 상태를 확인합니다.
+- 불필요한 인증방식 반복 호출은 제거했습니다. 기본은 `API_KEY` header + JSON POST입니다.
 
 `KIPRIS_API_KEY`가 없으면 KIPRIS route가 필요한 질문도 앱이 중단되지 않고 Google Patents 웹검색으로 대체합니다.
 
