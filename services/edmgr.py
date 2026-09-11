@@ -15,6 +15,7 @@ from config import (
 )
 
 PATENT_COLUMNS = {
+    "exmnYr": "조사연도",
     "schlNm": "학교명",
     "brncYn": "분교여부",
     "aplcnYr": "적용연도",
@@ -25,6 +26,7 @@ PATENT_COLUMNS = {
 }
 
 TRANSFER_COLUMNS = {
+    "exmnYr": "조사연도",
     "schlNm": "학교명",
     "brncYn": "분교여부",
     "aplcnYr": "적용연도",
@@ -57,40 +59,19 @@ def _service_label(url: str) -> str:
 
 
 def _api_key_for_url(url: str) -> tuple[str, str, str]:
-    """Use one shared education-data API key for both services.
-
-    The old per-service secret names are retained only as compatibility
-    fallbacks so an already deployed app does not break immediately.
-    """
+    """Both university-disclosure services use the same approved API key."""
     label = _service_label(url)
-
     api_key = get_secret("EDMGR_API_KEY")
-    secret_name = "EDMGR_API_KEY"
-
-    if not api_key:
-        legacy_name = (
-            "EDMGR_PATENT_API_KEY"
-            if url == PATENT_API_URL
-            else "EDMGR_TRANSFER_API_KEY"
-        )
-        api_key = get_secret(legacy_name)
-        if api_key:
-            secret_name = legacy_name
-
     if not api_key:
         raise ValueError(
             f"{label} OpenAPI 인증키가 없습니다. "
-            "Streamlit Secrets에 EDMGR_API_KEY를 설정해 주세요."
+            "Streamlit Secrets에 공통 EDMGR_API_KEY를 설정해 주세요. "
+            "EDMGR_PATENT_API_KEY/EDMGR_TRANSFER_API_KEY는 더 이상 사용하지 않습니다."
         )
+    return api_key, "EDMGR_API_KEY", label
 
-    return api_key, secret_name, label
 
-
-def _post_once(
-    url: str,
-    payload: dict,
-    content_mode: str,
-) -> requests.Response:
+def _post_once(url: str, payload: dict, content_mode: str) -> requests.Response:
     api_key, _, _ = _api_key_for_url(url)
     auth_mode = str(EDMGR_AUTH_MODE or "header").lower().strip()
     if auth_mode not in {"header", "body", "both"}:
@@ -98,7 +79,6 @@ def _post_once(
 
     headers = {"Accept": "application/json"}
     body = dict(payload)
-
     if auth_mode in {"header", "both"}:
         headers["API_KEY"] = api_key
     if auth_mode in {"body", "both"}:
@@ -107,7 +87,6 @@ def _post_once(
     if content_mode == "json":
         headers["Content-Type"] = "application/json"
         return requests.post(url, headers=headers, json=body, timeout=60)
-
     return requests.post(url, headers=headers, data=body, timeout=60)
 
 
@@ -139,12 +118,10 @@ def _find_best_record_list(obj, expected_keys):
 
 @lru_cache(maxsize=128)
 def _call_edmgr_cached(url: str, year: int, expected_keys: tuple[str, ...]):
+    # exmnYr is the only data request parameter exposed by the portal test UI.
     payload = {"exmnYr": str(year)}
     _, secret_name, label = _api_key_for_url(url)
 
-    # The portal documentation used by this project specifies POST + JSON and
-    # API_KEY header authentication. Only retry as form for request-format
-    # errors; authentication/provider errors are not retried repeatedly.
     resp = _post_once(url, payload, "json")
     attempts = [f"{str(EDMGR_AUTH_MODE or 'header').lower()}/json:{resp.status_code}"]
 
@@ -175,7 +152,6 @@ def _call_edmgr_cached(url: str, year: int, expected_keys: tuple[str, ...]):
             f"{label} API가 HTTP 200을 반환했지만 예상 데이터 행이 없습니다. "
             f"End Point: {url}. 응답 미리보기: {str(parsed)[:500]}"
         )
-
     return parsed
 
 
@@ -193,21 +169,21 @@ def _numeric_series(series: pd.Series) -> pd.Series:
 def _normalize(raw, expected_columns, source_name: str) -> pd.DataFrame:
     rows, path = _find_best_record_list(raw, expected_columns.keys())
     if not rows:
-        preview = str(raw)[:350]
         raise RuntimeError(
-            f"{source_name} 응답에서 예상 데이터 행을 찾지 못했습니다. 응답 미리보기: {preview}"
+            f"{source_name} 응답에서 예상 데이터 행을 찾지 못했습니다. "
+            f"응답 미리보기: {str(raw)[:350]}"
         )
 
     df = pd.DataFrame(rows)
     for col in expected_columns:
         if col not in df.columns:
             df[col] = pd.NA
-
     df = df[list(expected_columns)].copy()
-    for col in ["schlNm", "brncYn", "aplcnYr"]:
-        df[col] = df[col].astype("string").str.strip()
 
-    for col in [c for c in df.columns if c not in {"schlNm", "brncYn", "aplcnYr"}]:
+    text_cols = {"exmnYr", "schlNm", "brncYn", "aplcnYr"}
+    for col in text_cols:
+        df[col] = df[col].astype("string").str.strip()
+    for col in [c for c in df.columns if c not in text_cols]:
         df[col] = _numeric_series(df[col])
 
     df["_source"] = source_name
@@ -216,20 +192,12 @@ def _normalize(raw, expected_columns, source_name: str) -> pd.DataFrame:
 
 
 def fetch_patent(year: int) -> pd.DataFrame:
-    raw = _call_edmgr_cached(
-        PATENT_API_URL,
-        int(year),
-        tuple(PATENT_COLUMNS.keys()),
-    )
+    raw = _call_edmgr_cached(PATENT_API_URL, int(year), tuple(PATENT_COLUMNS.keys()))
     return _normalize(raw, PATENT_COLUMNS, "특허출원및등록실적[대학정보공시]")
 
 
 def fetch_transfer(year: int) -> pd.DataFrame:
-    raw = _call_edmgr_cached(
-        TRANSFER_API_URL,
-        int(year),
-        tuple(TRANSFER_COLUMNS.keys()),
-    )
+    raw = _call_edmgr_cached(TRANSFER_API_URL, int(year), tuple(TRANSFER_COLUMNS.keys()))
     return _normalize(raw, TRANSFER_COLUMNS, "기술이전수입료및계약실적[대학정보공시]")
 
 
@@ -240,7 +208,6 @@ def fetch_years(years: Iterable[int], source: str) -> tuple[pd.DataFrame, list[t
 
     frames = []
     errors: list[tuple[int, str]] = []
-
     for year in years:
         try:
             if source == "patent":
@@ -253,7 +220,7 @@ def fetch_years(years: Iterable[int], source: str) -> tuple[pd.DataFrame, list[t
                 frame = pd.merge(
                     p,
                     t,
-                    on=["schlNm", "brncYn", "aplcnYr"],
+                    on=["exmnYr", "schlNm", "brncYn", "aplcnYr"],
                     how="outer",
                 )
             else:
@@ -263,6 +230,10 @@ def fetch_years(years: Iterable[int], source: str) -> tuple[pd.DataFrame, list[t
             frames.append(frame)
         except Exception as exc:
             errors.append((year, str(exc)))
+            # PROVIDER routing/auth mapping failures are independent of year.
+            # Stop immediately instead of repeating the same failed request for every year.
+            if "PROVIDER" in str(exc) or "공통 EDMGR_API_KEY" in str(exc):
+                break
 
     if not frames:
         detail = " | ".join(f"{y}: {e}" for y, e in errors)
