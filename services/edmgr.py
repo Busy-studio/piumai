@@ -58,58 +58,34 @@ def _service_label(url: str) -> str:
     return "대학정보공시"
 
 
-def _portal_test_url(url: str) -> str | None:
-    if "SA00202500062" in url:
-        return "https://www.edmgr.kr/ot/udp/api/cm/SA00202500062"
-    if "SA00202500061" in url:
-        return "https://www.edmgr.kr/ot/udp/api/cm/SA00202500061"
-    return None
-
-
 def _api_key_for_url(url: str) -> tuple[str, str, str]:
     label = _service_label(url)
     api_key = get_secret("EDMGR_API_KEY")
     if not api_key:
         raise ValueError(
             f"{label} OpenAPI 인증키가 없습니다. "
-            "Streamlit Secrets에 공통 EDMGR_API_KEY를 설정해 주세요. "
-            "EDMGR_PATENT_API_KEY/EDMGR_TRANSFER_API_KEY는 더 이상 사용하지 않습니다."
+            "Streamlit Secrets에 공통 EDMGR_API_KEY를 설정해 주세요."
         )
     return api_key, "EDMGR_API_KEY", label
 
 
-def _post_with_auth(
-    url: str,
-    payload: dict,
-    *,
-    auth_mode: str,
-    content_mode: str = "json",
-) -> requests.Response:
+def _post_once(url: str, payload: dict, content_mode: str = "json") -> requests.Response:
     api_key, _, _ = _api_key_for_url(url)
-    mode = str(auth_mode or "header").lower().strip()
-    if mode not in {"header", "body", "both"}:
-        mode = "header"
+    auth_mode = str(EDMGR_AUTH_MODE or "header").lower().strip()
+    if auth_mode not in {"header", "body", "both"}:
+        auth_mode = "header"
 
     headers = {"Accept": "application/json"}
     body = dict(payload)
-    if mode in {"header", "both"}:
+    if auth_mode in {"header", "both"}:
         headers["API_KEY"] = api_key
-    if mode in {"body", "both"}:
+    if auth_mode in {"body", "both"}:
         body["userApiAthkCn"] = api_key
 
     if content_mode == "json":
         headers["Content-Type"] = "application/json"
         return requests.post(url, headers=headers, json=body, timeout=60)
     return requests.post(url, headers=headers, data=body, timeout=60)
-
-
-def _post_once(url: str, payload: dict, content_mode: str) -> requests.Response:
-    return _post_with_auth(
-        url,
-        payload,
-        auth_mode=str(EDMGR_AUTH_MODE or "header"),
-        content_mode=content_mode,
-    )
 
 
 def _find_best_record_list(obj, expected_keys):
@@ -138,13 +114,6 @@ def _find_best_record_list(obj, expected_keys):
     return candidates[0][3], candidates[0][2]
 
 
-def _is_provider_not_found(resp: requests.Response) -> bool:
-    if resp.status_code != 404:
-        return False
-    text = (resp.text or "").upper()
-    return "PROVIDER" in text and "NOT FOUND" in text
-
-
 def _json_if_possible(resp: requests.Response):
     try:
         return resp.json()
@@ -152,33 +121,11 @@ def _json_if_possible(resp: requests.Response):
         return None
 
 
-def _msg_code(resp: requests.Response) -> str:
-    parsed = _json_if_possible(resp)
-    if isinstance(parsed, dict):
-        return str(parsed.get("msgCd") or "").strip().upper()
-    return ""
-
-
-def _portal_auth_probe(portal_url: str, payload: dict, attempts: list[str]) -> requests.Response:
-    """Try documented auth placements only on the portal test proxy.
-
-    The portal test UI returned ERR10 with header auth from the Streamlit server.
-    Probe body and both modes once so we can distinguish an auth-placement issue
-    from a browser-session-only proxy. No key values are logged.
-    """
-    first = _post_with_auth(portal_url, payload, auth_mode="header", content_mode="json")
-    attempts.append(f"portal-test header/json:{first.status_code}:{_msg_code(first) or '-'}")
-    if first.ok and _msg_code(first) not in {"ERR10"}:
-        return first
-
-    body = _post_with_auth(portal_url, payload, auth_mode="body", content_mode="json")
-    attempts.append(f"portal-test body/json:{body.status_code}:{_msg_code(body) or '-'}")
-    if body.ok and _msg_code(body) not in {"ERR10"}:
-        return body
-
-    both = _post_with_auth(portal_url, payload, auth_mode="both", content_mode="json")
-    attempts.append(f"portal-test both/json:{both.status_code}:{_msg_code(both) or '-'}")
-    return both
+def _is_provider_not_found(resp: requests.Response) -> bool:
+    if resp.status_code != 404:
+        return False
+    text = (resp.text or "").upper()
+    return "PROVIDER" in text and "NOT FOUND" in text
 
 
 @lru_cache(maxsize=128)
@@ -187,49 +134,52 @@ def _call_edmgr_cached(url: str, year: int, expected_keys: tuple[str, ...]):
     _, secret_name, label = _api_key_for_url(url)
 
     resp = _post_once(url, payload, "json")
-    attempts = [f"external {str(EDMGR_AUTH_MODE or 'header').lower()}/json:{resp.status_code}"]
-    effective_url = url
+    attempts = [f"{str(EDMGR_AUTH_MODE or 'header').lower()}/json:{resp.status_code}"]
 
     if resp.status_code in {400, 405, 415, 422}:
         form_resp = _post_once(url, payload, "form")
-        attempts.append(f"external {str(EDMGR_AUTH_MODE or 'header').lower()}/form:{form_resp.status_code}")
+        attempts.append(f"{str(EDMGR_AUTH_MODE or 'header').lower()}/form:{form_resp.status_code}")
         if form_resp.ok:
             resp = form_resp
 
     if _is_provider_not_found(resp):
-        portal_url = _portal_test_url(url)
-        if portal_url:
-            resp = _portal_auth_probe(portal_url, payload, attempts)
-            effective_url = portal_url
+        raise RuntimeError(
+            f"{label} 외부 OpenAPI 게이트웨이가 해당 provider를 찾지 못했습니다 "
+            f"(HTTP 404 / PROVIDER Not Found). 사용 키: {secret_name}. "
+            f"요청 시도: {', '.join(attempts)}. End Point: {url}. "
+            "포털의 /ot/udp/api/cm/... 경로는 로그인 세션 기반 내부 테스트 경로로 확인되어 "
+            "서버에서 대체 호출하지 않습니다. 승인된 외부 End Point/provider 활성화 상태를 "
+            "교육데이터플랫폼 측에서 확인해야 합니다."
+        )
 
     if not resp.ok:
         raise RuntimeError(
             f"{label} API 호출 실패 (HTTP {resp.status_code}). "
             f"사용 키: {secret_name}. 요청 시도: {', '.join(attempts)}. "
-            f"최종 End Point: {effective_url}. 응답 미리보기: {_safe_response_message(resp)}"
+            f"End Point: {url}. 응답 미리보기: {_safe_response_message(resp)}"
         )
 
     parsed = _json_if_possible(resp)
     if parsed is None:
         raise RuntimeError(
             f"{label} API 응답을 JSON으로 해석하지 못했습니다. "
-            f"최종 End Point: {effective_url}. 응답 미리보기: {_safe_response_message(resp)}"
+            f"End Point: {url}. 응답 미리보기: {_safe_response_message(resp)}"
         )
 
-    msg_cd = str(parsed.get("msgCd") or "").strip().upper() if isinstance(parsed, dict) else ""
-    if msg_cd and not msg_cd.startswith("200"):
-        msg_cn = str(parsed.get("msgCn") or "") if isinstance(parsed, dict) else ""
-        raise RuntimeError(
-            f"{label} 서비스 오류 {msg_cd}: {msg_cn} "
-            f"사용 키: {secret_name}. 요청 시도: {', '.join(attempts)}. "
-            f"최종 End Point: {effective_url}."
-        )
+    if isinstance(parsed, dict):
+        msg_cd = str(parsed.get("msgCd") or "").strip().upper()
+        if msg_cd and not msg_cd.startswith("200"):
+            msg_cn = str(parsed.get("msgCn") or "")
+            raise RuntimeError(
+                f"{label} 서비스 오류 {msg_cd}: {msg_cn} "
+                f"사용 키: {secret_name}. 요청 시도: {', '.join(attempts)}. End Point: {url}."
+            )
 
     rows, _ = _find_best_record_list(parsed, expected_keys)
     if not rows:
         raise RuntimeError(
             f"{label} API가 HTTP 200을 반환했지만 예상 데이터 행이 없습니다. "
-            f"최종 End Point: {effective_url}. 응답 미리보기: {str(parsed)[:500]}"
+            f"End Point: {url}. 응답 미리보기: {str(parsed)[:500]}"
         )
     return parsed
 
@@ -313,10 +263,10 @@ def fetch_years(years: Iterable[int], source: str) -> tuple[pd.DataFrame, list[t
             if any(
                 token in text
                 for token in (
-                    "PROVIDER",
+                    "PROVIDER NOT FOUND",
                     "HTTP 401",
                     "HTTP 403",
-                    "공통 EDMGR_API_KEY",
+                    "EDMGR_API_KEY",
                     "서비스 오류 ERR10",
                 )
             ):
