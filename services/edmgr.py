@@ -48,43 +48,54 @@ def _safe_response_message(resp: requests.Response) -> str:
     return text[:500] + ("..." if len(text) > 500 else "")
 
 
-def _api_key_for_url(url: str) -> tuple[str, str, str]:
+def _service_label(url: str) -> str:
     if url == PATENT_API_URL:
-        secret_name = "EDMGR_PATENT_API_KEY"
-        label = "특허출원및등록실적"
-    elif url == TRANSFER_API_URL:
-        secret_name = "EDMGR_TRANSFER_API_KEY"
-        label = "기술이전수입료및계약실적"
-    else:
-        secret_name = "EDMGR_API_KEY"
-        label = "대학정보공시"
+        return "특허출원및등록실적"
+    if url == TRANSFER_API_URL:
+        return "기술이전수입료및계약실적"
+    return "대학정보공시"
 
-    api_key = get_secret(secret_name) or get_secret("EDMGR_API_KEY")
+
+def _api_key_for_url(url: str) -> tuple[str, str, str]:
+    """Use one shared education-data API key for both services.
+
+    The old per-service secret names are retained only as compatibility
+    fallbacks so an already deployed app does not break immediately.
+    """
+    label = _service_label(url)
+
+    api_key = get_secret("EDMGR_API_KEY")
+    secret_name = "EDMGR_API_KEY"
+
+    if not api_key:
+        legacy_name = (
+            "EDMGR_PATENT_API_KEY"
+            if url == PATENT_API_URL
+            else "EDMGR_TRANSFER_API_KEY"
+        )
+        api_key = get_secret(legacy_name)
+        if api_key:
+            secret_name = legacy_name
+
     if not api_key:
         raise ValueError(
             f"{label} OpenAPI 인증키가 없습니다. "
-            f"Streamlit Secrets에 {secret_name}를 설정해 주세요."
+            "Streamlit Secrets에 EDMGR_API_KEY를 설정해 주세요."
         )
+
     return api_key, secret_name, label
-
-
-def _auth_modes() -> list[str]:
-    configured = str(EDMGR_AUTH_MODE or "header").lower().strip()
-    valid = ["header", "body", "both"]
-    if configured == "auto":
-        return valid
-    if configured not in valid:
-        configured = "header"
-    return [configured] + [m for m in valid if m != configured]
 
 
 def _post_once(
     url: str,
     payload: dict,
     content_mode: str,
-    auth_mode: str,
 ) -> requests.Response:
     api_key, _, _ = _api_key_for_url(url)
+    auth_mode = str(EDMGR_AUTH_MODE or "header").lower().strip()
+    if auth_mode not in {"header", "body", "both"}:
+        auth_mode = "header"
+
     headers = {"Accept": "application/json"}
     body = dict(payload)
 
@@ -96,6 +107,7 @@ def _post_once(
     if content_mode == "json":
         headers["Content-Type"] = "application/json"
         return requests.post(url, headers=headers, json=body, timeout=60)
+
     return requests.post(url, headers=headers, data=body, timeout=60)
 
 
@@ -129,49 +141,42 @@ def _find_best_record_list(obj, expected_keys):
 def _call_edmgr_cached(url: str, year: int, expected_keys: tuple[str, ...]):
     payload = {"exmnYr": str(year)}
     _, secret_name, label = _api_key_for_url(url)
-    attempts: list[str] = []
-    last_resp: requests.Response | None = None
-    last_json = None
 
-    for auth_mode in _auth_modes():
-        for content_mode in ("json", "form"):
-            resp = _post_once(url, payload, content_mode, auth_mode)
-            attempts.append(f"{auth_mode}/{content_mode}:{resp.status_code}")
-            last_resp = resp
+    # The portal documentation used by this project specifies POST + JSON and
+    # API_KEY header authentication. Only retry as form for request-format
+    # errors; authentication/provider errors are not retried repeatedly.
+    resp = _post_once(url, payload, "json")
+    attempts = [f"{str(EDMGR_AUTH_MODE or 'header').lower()}/json:{resp.status_code}"]
 
-            if not resp.ok:
-                # Try the next request representation/auth placement only for
-                # likely auth or request-format failures.
-                if resp.status_code in {400, 401, 403, 404, 405, 415, 422}:
-                    continue
-                break
+    if resp.status_code in {400, 405, 415, 422}:
+        form_resp = _post_once(url, payload, "form")
+        attempts.append(f"{str(EDMGR_AUTH_MODE or 'header').lower()}/form:{form_resp.status_code}")
+        if form_resp.ok:
+            resp = form_resp
 
-            try:
-                parsed = resp.json()
-            except Exception:
-                # A 200 response without JSON is not a usable API success.
-                continue
+    if not resp.ok:
+        raise RuntimeError(
+            f"{label} API 호출 실패 (HTTP {resp.status_code}). "
+            f"사용 키: {secret_name}. 요청 시도: {', '.join(attempts)}. "
+            f"End Point: {url}. 응답 미리보기: {_safe_response_message(resp)}"
+        )
 
-            last_json = parsed
-            rows, _ = _find_best_record_list(parsed, expected_keys)
-            if rows:
-                return parsed
+    try:
+        parsed = resp.json()
+    except Exception as exc:
+        raise RuntimeError(
+            f"{label} API 응답을 JSON으로 해석하지 못했습니다. "
+            f"응답 미리보기: {_safe_response_message(resp)}"
+        ) from exc
 
-            # Some public APIs return HTTP 200 even when authentication/body
-            # validation failed. Continue and try the other supported modes.
-            continue
+    rows, _ = _find_best_record_list(parsed, expected_keys)
+    if not rows:
+        raise RuntimeError(
+            f"{label} API가 HTTP 200을 반환했지만 예상 데이터 행이 없습니다. "
+            f"End Point: {url}. 응답 미리보기: {str(parsed)[:500]}"
+        )
 
-    status = last_resp.status_code if last_resp is not None else "unknown"
-    response_preview = (
-        str(last_json)[:500]
-        if last_json is not None
-        else (_safe_response_message(last_resp) if last_resp is not None else "응답 없음")
-    )
-    raise RuntimeError(
-        f"{label} API 호출 실패 (HTTP {status}). "
-        f"사용 키: {secret_name}. 인증/요청 시도: {', '.join(attempts)}. "
-        f"응답 미리보기: {response_preview}"
-    )
+    return parsed
 
 
 def _numeric_series(series: pd.Series) -> pd.Series:
@@ -192,15 +197,19 @@ def _normalize(raw, expected_columns, source_name: str) -> pd.DataFrame:
         raise RuntimeError(
             f"{source_name} 응답에서 예상 데이터 행을 찾지 못했습니다. 응답 미리보기: {preview}"
         )
+
     df = pd.DataFrame(rows)
     for col in expected_columns:
         if col not in df.columns:
             df[col] = pd.NA
+
     df = df[list(expected_columns)].copy()
     for col in ["schlNm", "brncYn", "aplcnYr"]:
         df[col] = df[col].astype("string").str.strip()
+
     for col in [c for c in df.columns if c not in {"schlNm", "brncYn", "aplcnYr"}]:
         df[col] = _numeric_series(df[col])
+
     df["_source"] = source_name
     df["_detected_path"] = path
     return df
@@ -231,6 +240,7 @@ def fetch_years(years: Iterable[int], source: str) -> tuple[pd.DataFrame, list[t
 
     frames = []
     errors: list[tuple[int, str]] = []
+
     for year in years:
         try:
             if source == "patent":
@@ -248,6 +258,7 @@ def fetch_years(years: Iterable[int], source: str) -> tuple[pd.DataFrame, list[t
                 )
             else:
                 raise ValueError(f"지원하지 않는 데이터원: {source}")
+
             frame["_requestedExmnYr"] = str(year)
             frames.append(frame)
         except Exception as exc:
