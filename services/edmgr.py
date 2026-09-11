@@ -51,30 +51,22 @@ def _safe_response_message(resp: requests.Response) -> str:
 
 
 def _service_label(url: str) -> str:
-    if url == PATENT_API_URL:
+    if "SA00202500062" in url:
         return "특허출원및등록실적"
-    if url == TRANSFER_API_URL:
+    if "SA00202500061" in url:
         return "기술이전수입료및계약실적"
     return "대학정보공시"
 
 
 def _portal_test_url(url: str) -> str | None:
-    """Return the endpoint observed in the portal's own DevTools test request.
-
-    This is used only as a fallback after the documented openapi.edmgr.kr
-    endpoint returns the gateway-level PROVIDER 404. It may be a portal-only
-    proxy requiring a logged-in session, so it is not treated as authoritative
-    unless it actually succeeds from the Streamlit server.
-    """
-    if url == PATENT_API_URL:
+    if "SA00202500062" in url:
         return "https://www.edmgr.kr/ot/udp/api/cm/SA00202500062"
-    if url == TRANSFER_API_URL:
+    if "SA00202500061" in url:
         return "https://www.edmgr.kr/ot/udp/api/cm/SA00202500061"
     return None
 
 
 def _api_key_for_url(url: str) -> tuple[str, str, str]:
-    """Both university-disclosure services use the same approved API key."""
     label = _service_label(url)
     api_key = get_secret("EDMGR_API_KEY")
     if not api_key:
@@ -86,25 +78,38 @@ def _api_key_for_url(url: str) -> tuple[str, str, str]:
     return api_key, "EDMGR_API_KEY", label
 
 
-def _post_once(url: str, payload: dict, content_mode: str) -> requests.Response:
-    api_key, _, _ = _api_key_for_url(
-        PATENT_API_URL if "SA00202500062" in url else TRANSFER_API_URL
-    )
-    auth_mode = str(EDMGR_AUTH_MODE or "header").lower().strip()
-    if auth_mode not in {"header", "body", "both"}:
-        auth_mode = "header"
+def _post_with_auth(
+    url: str,
+    payload: dict,
+    *,
+    auth_mode: str,
+    content_mode: str = "json",
+) -> requests.Response:
+    api_key, _, _ = _api_key_for_url(url)
+    mode = str(auth_mode or "header").lower().strip()
+    if mode not in {"header", "body", "both"}:
+        mode = "header"
 
     headers = {"Accept": "application/json"}
     body = dict(payload)
-    if auth_mode in {"header", "both"}:
+    if mode in {"header", "both"}:
         headers["API_KEY"] = api_key
-    if auth_mode in {"body", "both"}:
+    if mode in {"body", "both"}:
         body["userApiAthkCn"] = api_key
 
     if content_mode == "json":
         headers["Content-Type"] = "application/json"
         return requests.post(url, headers=headers, json=body, timeout=60)
     return requests.post(url, headers=headers, data=body, timeout=60)
+
+
+def _post_once(url: str, payload: dict, content_mode: str) -> requests.Response:
+    return _post_with_auth(
+        url,
+        payload,
+        auth_mode=str(EDMGR_AUTH_MODE or "header"),
+        content_mode=content_mode,
+    )
 
 
 def _find_best_record_list(obj, expected_keys):
@@ -140,9 +145,44 @@ def _is_provider_not_found(resp: requests.Response) -> bool:
     return "PROVIDER" in text and "NOT FOUND" in text
 
 
+def _json_if_possible(resp: requests.Response):
+    try:
+        return resp.json()
+    except Exception:
+        return None
+
+
+def _msg_code(resp: requests.Response) -> str:
+    parsed = _json_if_possible(resp)
+    if isinstance(parsed, dict):
+        return str(parsed.get("msgCd") or "").strip().upper()
+    return ""
+
+
+def _portal_auth_probe(portal_url: str, payload: dict, attempts: list[str]) -> requests.Response:
+    """Try documented auth placements only on the portal test proxy.
+
+    The portal test UI returned ERR10 with header auth from the Streamlit server.
+    Probe body and both modes once so we can distinguish an auth-placement issue
+    from a browser-session-only proxy. No key values are logged.
+    """
+    first = _post_with_auth(portal_url, payload, auth_mode="header", content_mode="json")
+    attempts.append(f"portal-test header/json:{first.status_code}:{_msg_code(first) or '-'}")
+    if first.ok and _msg_code(first) not in {"ERR10"}:
+        return first
+
+    body = _post_with_auth(portal_url, payload, auth_mode="body", content_mode="json")
+    attempts.append(f"portal-test body/json:{body.status_code}:{_msg_code(body) or '-'}")
+    if body.ok and _msg_code(body) not in {"ERR10"}:
+        return body
+
+    both = _post_with_auth(portal_url, payload, auth_mode="both", content_mode="json")
+    attempts.append(f"portal-test both/json:{both.status_code}:{_msg_code(both) or '-'}")
+    return both
+
+
 @lru_cache(maxsize=128)
 def _call_edmgr_cached(url: str, year: int, expected_keys: tuple[str, ...]):
-    # exmnYr is the only data request parameter exposed by the portal test UI.
     payload = {"exmnYr": str(year)}
     _, secret_name, label = _api_key_for_url(url)
 
@@ -156,26 +196,10 @@ def _call_edmgr_cached(url: str, year: int, expected_keys: tuple[str, ...]):
         if form_resp.ok:
             resp = form_resp
 
-    # The portal's own test button was observed to POST to
-    # https://www.edmgr.kr/ot/udp/api/cm/<service-code> and return HTTP 200.
-    # Try that exact route only when the documented external endpoint fails at
-    # the provider-routing layer. This tells us whether the portal route is
-    # callable server-to-server or only with a logged-in browser session.
     if _is_provider_not_found(resp):
         portal_url = _portal_test_url(url)
         if portal_url:
-            portal_resp = _post_once(portal_url, payload, "json")
-            attempts.append(
-                f"portal-test {str(EDMGR_AUTH_MODE or 'header').lower()}/json:{portal_resp.status_code}"
-            )
-            if portal_resp.status_code in {400, 405, 415, 422}:
-                portal_form = _post_once(portal_url, payload, "form")
-                attempts.append(
-                    f"portal-test {str(EDMGR_AUTH_MODE or 'header').lower()}/form:{portal_form.status_code}"
-                )
-                if portal_form.ok:
-                    portal_resp = portal_form
-            resp = portal_resp
+            resp = _portal_auth_probe(portal_url, payload, attempts)
             effective_url = portal_url
 
     if not resp.ok:
@@ -185,13 +209,21 @@ def _call_edmgr_cached(url: str, year: int, expected_keys: tuple[str, ...]):
             f"최종 End Point: {effective_url}. 응답 미리보기: {_safe_response_message(resp)}"
         )
 
-    try:
-        parsed = resp.json()
-    except Exception as exc:
+    parsed = _json_if_possible(resp)
+    if parsed is None:
         raise RuntimeError(
             f"{label} API 응답을 JSON으로 해석하지 못했습니다. "
             f"최종 End Point: {effective_url}. 응답 미리보기: {_safe_response_message(resp)}"
-        ) from exc
+        )
+
+    msg_cd = str(parsed.get("msgCd") or "").strip().upper() if isinstance(parsed, dict) else ""
+    if msg_cd and not msg_cd.startswith("200"):
+        msg_cn = str(parsed.get("msgCn") or "") if isinstance(parsed, dict) else ""
+        raise RuntimeError(
+            f"{label} 서비스 오류 {msg_cd}: {msg_cn} "
+            f"사용 키: {secret_name}. 요청 시도: {', '.join(attempts)}. "
+            f"최종 End Point: {effective_url}."
+        )
 
     rows, _ = _find_best_record_list(parsed, expected_keys)
     if not rows:
@@ -277,10 +309,17 @@ def fetch_years(years: Iterable[int], source: str) -> tuple[pd.DataFrame, list[t
             frames.append(frame)
         except Exception as exc:
             errors.append((year, str(exc)))
-            # Provider/session/auth failures are independent of year. Stop
-            # immediately instead of repeating the same failed request.
             text = str(exc).upper()
-            if any(token in text for token in ("PROVIDER", "HTTP 401", "HTTP 403", "공통 EDMGR_API_KEY")):
+            if any(
+                token in text
+                for token in (
+                    "PROVIDER",
+                    "HTTP 401",
+                    "HTTP 403",
+                    "공통 EDMGR_API_KEY",
+                    "서비스 오류 ERR10",
+                )
+            ):
                 break
 
     if not frames:
