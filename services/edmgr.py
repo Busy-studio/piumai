@@ -48,12 +48,8 @@ def _safe_response_message(resp: requests.Response) -> str:
     return text[:500] + ("..." if len(text) > 500 else "")
 
 
-def _api_key_for_url(url: str) -> tuple[str | None, str]:
-    """Use the API key issued for each university-disclosure service.
-
-    EDMGR_API_KEY is kept only as a backwards-compatible fallback for an
-    existing deployment that previously used one shared key.
-    """
+def _api_key_for_url(url: str) -> tuple[str, str, str]:
+    """Return service-specific key, its secret name, and a human label."""
     if url == PATENT_API_URL:
         secret_name = "EDMGR_PATENT_API_KEY"
         label = "특허출원및등록실적"
@@ -64,23 +60,39 @@ def _api_key_for_url(url: str) -> tuple[str | None, str]:
         secret_name = "EDMGR_API_KEY"
         label = "대학정보공시"
 
+    # Keep the old shared key only as a compatibility fallback.
     api_key = get_secret(secret_name) or get_secret("EDMGR_API_KEY")
     if not api_key:
         raise ValueError(
-            f"{label} OpenAPI 인증키가 설정되지 않았습니다. "
+            f"{label} OpenAPI 인증키가 없습니다. "
             f"Streamlit Secrets에 {secret_name}를 설정해 주세요."
         )
-    return api_key, secret_name
+    return api_key, secret_name, label
 
 
-def _post_once(url: str, payload: dict, content_mode: str) -> requests.Response:
-    api_key, _ = _api_key_for_url(url)
+def _auth_modes() -> list[str]:
+    configured = str(EDMGR_AUTH_MODE or "header").lower().strip()
+    valid = ["header", "body", "both"]
+    if configured == "auto":
+        return valid
+    if configured not in valid:
+        configured = "header"
+    return [configured] + [m for m in valid if m != configured]
 
+
+def _post_once(
+    url: str,
+    payload: dict,
+    content_mode: str,
+    auth_mode: str,
+) -> requests.Response:
+    api_key, _, _ = _api_key_for_url(url)
     headers = {"Accept": "application/json"}
     body = dict(payload)
-    if EDMGR_AUTH_MODE in {"header", "both"}:
+
+    if auth_mode in {"header", "both"}:
         headers["API_KEY"] = api_key
-    if EDMGR_AUTH_MODE in {"body", "both"}:
+    if auth_mode in {"body", "both"}:
         body["userApiAthkCn"] = api_key
 
     if content_mode == "json":
@@ -92,21 +104,48 @@ def _post_once(url: str, payload: dict, content_mode: str) -> requests.Response:
 @lru_cache(maxsize=128)
 def _call_edmgr_cached(url: str, year: int):
     payload = {"exmnYr": str(year)}
-    resp = _post_once(url, payload, "json")
-    if resp.status_code in {400, 404, 405, 415, 422}:
-        retry = _post_once(url, payload, "form")
-        if retry.ok:
-            resp = retry
-    if not resp.ok:
-        raise RuntimeError(
-            f"교육데이터 API 호출 실패: HTTP {resp.status_code} / {_safe_response_message(resp)}"
-        )
-    try:
-        return resp.json()
-    except Exception as exc:
-        raise RuntimeError(
-            f"교육데이터 API 응답을 JSON으로 해석하지 못했습니다: {_safe_response_message(resp)}"
-        ) from exc
+    _, secret_name, label = _api_key_for_url(url)
+    attempts: list[str] = []
+    last_resp: requests.Response | None = None
+
+    for auth_mode in _auth_modes():
+        resp = _post_once(url, payload, "json", auth_mode)
+        attempts.append(f"{auth_mode}/json:{resp.status_code}")
+
+        # Some EDMGR services accept form body instead of JSON.
+        if resp.status_code in {400, 404, 405, 415, 422}:
+            retry = _post_once(url, payload, "form", auth_mode)
+            attempts.append(f"{auth_mode}/form:{retry.status_code}")
+            if retry.ok:
+                resp = retry
+
+        if resp.ok:
+            try:
+                return resp.json()
+            except Exception as exc:
+                raise RuntimeError(
+                    f"{label} API 응답을 JSON으로 해석하지 못했습니다. "
+                    f"응답: {_safe_response_message(resp)}"
+                ) from exc
+
+        last_resp = resp
+        # Authentication failure: try the next supported placement of the key.
+        if resp.status_code in {401, 403}:
+            continue
+
+        # For request-format failures, trying the remaining auth placements may still help.
+        if resp.status_code in {400, 404, 405, 415, 422}:
+            continue
+
+        break
+
+    status = last_resp.status_code if last_resp is not None else "unknown"
+    detail = _safe_response_message(last_resp) if last_resp is not None else "응답 없음"
+    raise RuntimeError(
+        f"{label} API 호출 실패 (HTTP {status}). "
+        f"사용 키: {secret_name}. 인증 시도: {', '.join(attempts)}. "
+        f"서버 응답: {detail}"
+    )
 
 
 def _find_best_record_list(obj, expected_keys):
@@ -149,7 +188,10 @@ def _numeric_series(series: pd.Series) -> pd.Series:
 def _normalize(raw, expected_columns, source_name: str) -> pd.DataFrame:
     rows, path = _find_best_record_list(raw, expected_columns.keys())
     if not rows:
-        raise RuntimeError(f"{source_name} 응답에서 데이터 행을 찾지 못했습니다.")
+        preview = str(raw)[:350]
+        raise RuntimeError(
+            f"{source_name} 응답에서 예상 데이터 행을 찾지 못했습니다. 응답 미리보기: {preview}"
+        )
     df = pd.DataFrame(rows)
     for col in expected_columns:
         if col not in df.columns:
@@ -196,7 +238,12 @@ def fetch_years(years: Iterable[int], source: str) -> tuple[pd.DataFrame, list[t
             elif source == "both":
                 p = fetch_patent(year).drop(columns=["_source", "_detected_path"], errors="ignore")
                 t = fetch_transfer(year).drop(columns=["_source", "_detected_path"], errors="ignore")
-                frame = pd.merge(p, t, on=["schlNm", "brncYn", "aplcnYr"], how="outer")
+                frame = pd.merge(
+                    p,
+                    t,
+                    on=["schlNm", "brncYn", "aplcnYr"],
+                    how="outer",
+                )
             else:
                 raise ValueError(f"지원하지 않는 데이터원: {source}")
             frame["_requestedExmnYr"] = str(year)
@@ -205,7 +252,7 @@ def fetch_years(years: Iterable[int], source: str) -> tuple[pd.DataFrame, list[t
             errors.append((year, str(exc)))
 
     if not frames:
-        detail = "; ".join(f"{y}: {e}" for y, e in errors)
+        detail = " | ".join(f"{y}: {e}" for y, e in errors)
         raise RuntimeError(f"대학정보공시 데이터를 가져오지 못했습니다. {detail}")
 
     out = pd.concat(frames, ignore_index=True).drop_duplicates()
