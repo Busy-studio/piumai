@@ -58,6 +58,21 @@ def _service_label(url: str) -> str:
     return "대학정보공시"
 
 
+def _portal_test_url(url: str) -> str | None:
+    """Return the endpoint observed in the portal's own DevTools test request.
+
+    This is used only as a fallback after the documented openapi.edmgr.kr
+    endpoint returns the gateway-level PROVIDER 404. It may be a portal-only
+    proxy requiring a logged-in session, so it is not treated as authoritative
+    unless it actually succeeds from the Streamlit server.
+    """
+    if url == PATENT_API_URL:
+        return "https://www.edmgr.kr/ot/udp/api/cm/SA00202500062"
+    if url == TRANSFER_API_URL:
+        return "https://www.edmgr.kr/ot/udp/api/cm/SA00202500061"
+    return None
+
+
 def _api_key_for_url(url: str) -> tuple[str, str, str]:
     """Both university-disclosure services use the same approved API key."""
     label = _service_label(url)
@@ -72,7 +87,9 @@ def _api_key_for_url(url: str) -> tuple[str, str, str]:
 
 
 def _post_once(url: str, payload: dict, content_mode: str) -> requests.Response:
-    api_key, _, _ = _api_key_for_url(url)
+    api_key, _, _ = _api_key_for_url(
+        PATENT_API_URL if "SA00202500062" in url else TRANSFER_API_URL
+    )
     auth_mode = str(EDMGR_AUTH_MODE or "header").lower().strip()
     if auth_mode not in {"header", "body", "both"}:
         auth_mode = "header"
@@ -116,6 +133,13 @@ def _find_best_record_list(obj, expected_keys):
     return candidates[0][3], candidates[0][2]
 
 
+def _is_provider_not_found(resp: requests.Response) -> bool:
+    if resp.status_code != 404:
+        return False
+    text = (resp.text or "").upper()
+    return "PROVIDER" in text and "NOT FOUND" in text
+
+
 @lru_cache(maxsize=128)
 def _call_edmgr_cached(url: str, year: int, expected_keys: tuple[str, ...]):
     # exmnYr is the only data request parameter exposed by the portal test UI.
@@ -123,19 +147,42 @@ def _call_edmgr_cached(url: str, year: int, expected_keys: tuple[str, ...]):
     _, secret_name, label = _api_key_for_url(url)
 
     resp = _post_once(url, payload, "json")
-    attempts = [f"{str(EDMGR_AUTH_MODE or 'header').lower()}/json:{resp.status_code}"]
+    attempts = [f"external {str(EDMGR_AUTH_MODE or 'header').lower()}/json:{resp.status_code}"]
+    effective_url = url
 
     if resp.status_code in {400, 405, 415, 422}:
         form_resp = _post_once(url, payload, "form")
-        attempts.append(f"{str(EDMGR_AUTH_MODE or 'header').lower()}/form:{form_resp.status_code}")
+        attempts.append(f"external {str(EDMGR_AUTH_MODE or 'header').lower()}/form:{form_resp.status_code}")
         if form_resp.ok:
             resp = form_resp
+
+    # The portal's own test button was observed to POST to
+    # https://www.edmgr.kr/ot/udp/api/cm/<service-code> and return HTTP 200.
+    # Try that exact route only when the documented external endpoint fails at
+    # the provider-routing layer. This tells us whether the portal route is
+    # callable server-to-server or only with a logged-in browser session.
+    if _is_provider_not_found(resp):
+        portal_url = _portal_test_url(url)
+        if portal_url:
+            portal_resp = _post_once(portal_url, payload, "json")
+            attempts.append(
+                f"portal-test {str(EDMGR_AUTH_MODE or 'header').lower()}/json:{portal_resp.status_code}"
+            )
+            if portal_resp.status_code in {400, 405, 415, 422}:
+                portal_form = _post_once(portal_url, payload, "form")
+                attempts.append(
+                    f"portal-test {str(EDMGR_AUTH_MODE or 'header').lower()}/form:{portal_form.status_code}"
+                )
+                if portal_form.ok:
+                    portal_resp = portal_form
+            resp = portal_resp
+            effective_url = portal_url
 
     if not resp.ok:
         raise RuntimeError(
             f"{label} API 호출 실패 (HTTP {resp.status_code}). "
             f"사용 키: {secret_name}. 요청 시도: {', '.join(attempts)}. "
-            f"End Point: {url}. 응답 미리보기: {_safe_response_message(resp)}"
+            f"최종 End Point: {effective_url}. 응답 미리보기: {_safe_response_message(resp)}"
         )
 
     try:
@@ -143,14 +190,14 @@ def _call_edmgr_cached(url: str, year: int, expected_keys: tuple[str, ...]):
     except Exception as exc:
         raise RuntimeError(
             f"{label} API 응답을 JSON으로 해석하지 못했습니다. "
-            f"응답 미리보기: {_safe_response_message(resp)}"
+            f"최종 End Point: {effective_url}. 응답 미리보기: {_safe_response_message(resp)}"
         ) from exc
 
     rows, _ = _find_best_record_list(parsed, expected_keys)
     if not rows:
         raise RuntimeError(
             f"{label} API가 HTTP 200을 반환했지만 예상 데이터 행이 없습니다. "
-            f"End Point: {url}. 응답 미리보기: {str(parsed)[:500]}"
+            f"최종 End Point: {effective_url}. 응답 미리보기: {str(parsed)[:500]}"
         )
     return parsed
 
@@ -230,9 +277,10 @@ def fetch_years(years: Iterable[int], source: str) -> tuple[pd.DataFrame, list[t
             frames.append(frame)
         except Exception as exc:
             errors.append((year, str(exc)))
-            # PROVIDER routing/auth mapping failures are independent of year.
-            # Stop immediately instead of repeating the same failed request for every year.
-            if "PROVIDER" in str(exc) or "공통 EDMGR_API_KEY" in str(exc):
+            # Provider/session/auth failures are independent of year. Stop
+            # immediately instead of repeating the same failed request.
+            text = str(exc).upper()
+            if any(token in text for token in ("PROVIDER", "HTTP 401", "HTTP 403", "공통 EDMGR_API_KEY")):
                 break
 
     if not frames:
