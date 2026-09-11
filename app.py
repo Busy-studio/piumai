@@ -165,8 +165,28 @@ def process_question(question: str, from_voice: bool = False):
         {"role": m.get("role"), "content": m.get("content", "")}
         for m in st.session_state.messages[:-1]
     ]
-    with st.spinner("PIUM AI가 확인하고 있습니다..."):
-        result = ask(user_text, history_for_model)
+
+    try:
+        with st.spinner("PIUM AI가 확인하고 있습니다..."):
+            result = ask(user_text, history_for_model)
+    except Exception as exc:
+        # Do not let a remote API/configuration problem crash the whole Streamlit app.
+        # The backend error messages intentionally never contain the actual secret value.
+        message = (
+            "데이터 조회 중 오류가 발생했습니다. 앱은 정상적으로 계속 사용할 수 있습니다.\n\n"
+            f"**진단:** `{type(exc).__name__}: {exc}`\n\n"
+            "왼쪽 사이드바의 **API 연결 상태**에서 필요한 키가 설정되어 있는지 확인해 주세요."
+        )
+        st.session_state.messages.append(
+            {
+                "role": "assistant",
+                "content": message,
+                "source_mode": "API 오류 진단",
+            }
+        )
+        st.rerun()
+        return
+
     assistant = {"role": "assistant", "content": result.pop("answer"), **result}
     if assistant.get("kipris_used"):
         st.session_state.kipris_calls += 1
@@ -201,6 +221,20 @@ with st.sidebar:
         st.session_state.messages = []
         st.session_state.last_audio_hash = ""
         st.rerun()
+
+    st.divider()
+    st.subheader("API 연결 상태")
+    shared_edmgr = bool(get_secret("EDMGR_API_KEY"))
+    status_rows = [
+        ("OpenAI", bool(get_secret("OPENAI_API_KEY"))),
+        ("대학정보공시 · 특허", bool(get_secret("EDMGR_PATENT_API_KEY")) or shared_edmgr),
+        ("대학정보공시 · 기술이전", bool(get_secret("EDMGR_TRANSFER_API_KEY")) or shared_edmgr),
+        ("KIPRIS (선택)", bool(get_secret("KIPRIS_API_KEY"))),
+    ]
+    for label, ok in status_rows:
+        st.caption(f"{'✅' if ok else '⚠️'} {label}")
+
+    st.divider()
     st.caption(f"이번 세션 KIPRIS 호출: {st.session_state.kipris_calls}회")
     st.caption("KIPRIS는 정확한 국내 특허 확인이 필요할 때만 사용하도록 설계되어 있습니다.")
 
