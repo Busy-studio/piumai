@@ -64,20 +64,23 @@ def compute_result(df: pd.DataFrame, plan: dict) -> tuple[pd.DataFrame, dict]:
 
     analysis = plan.get("analysis_type", "lookup")
     top_n = int(plan.get("top_n", 10))
-    keys = ["aplcnYr", "schlNm", "brncYn"]
+    keys = [c for c in ["exmnYr", "aplcnYr", "schlNm", "brncYn"] if c in work.columns]
+    year_col = "exmnYr" if "exmnYr" in work.columns else "aplcnYr"
 
     if analysis == "ranking":
-        if work["aplcnYr"].nunique(dropna=True) > 1:
+        if work[year_col].nunique(dropna=True) > 1:
             result = (
                 work[keys + metrics]
-                .sort_values(["aplcnYr", metrics[0]], ascending=[True, False])
-                .groupby("aplcnYr", dropna=False, group_keys=False)
+                .sort_values([year_col, metrics[0]], ascending=[True, False])
+                .groupby(year_col, dropna=False, group_keys=False)
                 .head(top_n)
             )
         else:
             result = work[keys + metrics].sort_values(metrics[0], ascending=False).head(top_n)
     elif analysis == "trend":
-        group_keys = ["aplcnYr"]
+        group_keys = [year_col]
+        if "aplcnYr" in work.columns and year_col != "aplcnYr":
+            group_keys.append("aplcnYr")
         if resolved or work["schlNm"].nunique() <= 10:
             group_keys.append("schlNm")
         result = (
@@ -85,7 +88,7 @@ def compute_result(df: pd.DataFrame, plan: dict) -> tuple[pd.DataFrame, dict]:
             .groupby(group_keys, dropna=False, as_index=False)
             .sum(numeric_only=True, min_count=1)
         )
-        result["_year"] = pd.to_numeric(result["aplcnYr"], errors="coerce")
+        result["_year"] = pd.to_numeric(result[year_col], errors="coerce")
         result = result.sort_values(["_year"] + (["schlNm"] if "schlNm" in result else [])).drop(columns="_year")
     elif analysis == "correlation":
         if len(metrics) < 2:
@@ -93,7 +96,7 @@ def compute_result(df: pd.DataFrame, plan: dict) -> tuple[pd.DataFrame, dict]:
         result = work[keys + metrics[:2]].dropna(subset=metrics[:2]).copy()
     else:
         result = work[keys + metrics].copy()
-        result["_year"] = pd.to_numeric(result["aplcnYr"], errors="coerce")
+        result["_year"] = pd.to_numeric(result[year_col], errors="coerce")
         result = result.sort_values(["_year", "schlNm"]).drop(columns="_year")
 
     return result.reset_index(drop=True), {
@@ -101,12 +104,19 @@ def compute_result(df: pd.DataFrame, plan: dict) -> tuple[pd.DataFrame, dict]:
         "metrics": metrics,
         "analysis_type": analysis,
         "rows": len(result),
+        "year_basis": "exmnYr" if year_col == "exmnYr" else "aplcnYr",
     }
 
 
 def format_display_df(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy().rename(
-        columns={"aplcnYr": "연도", "schlNm": "학교명", "brncYn": "분교여부", **METRIC_LABELS}
+        columns={
+            "exmnYr": "조사연도",
+            "aplcnYr": "적용연도",
+            "schlNm": "학교명",
+            "brncYn": "분교여부",
+            **METRIC_LABELS,
+        }
     )
     for col in COUNT_LABELS:
         if col in out.columns:
