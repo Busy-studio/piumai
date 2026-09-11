@@ -3,6 +3,7 @@ from __future__ import annotations
 from analysis.stats import compute_result, format_display_df
 from config import DEFAULT_YEAR
 from services import kipris
+from services import supabase_store
 from services.edmgr import fetch_years
 from services.openai_service import (
     kipris_answer,
@@ -87,9 +88,17 @@ def ask(question: str, history: list[dict]) -> dict:
             "transfer" if plan.get("metric") in {"ctrtNocs", "techBfrImpfAmt"} else "patent"
         )
 
-    data, fetch_errors = fetch_years(years, source)
+    # Normal chatbot traffic reads the stored Supabase snapshot.
+    # EDMGR is used directly only before Supabase is configured.
+    if supabase_store.is_configured():
+        data, fetch_errors = supabase_store.load_stats(years, source)
+        source_mode = "Supabase · 대학정보공시 저장본"
+    else:
+        data, fetch_errors = fetch_years(years, source)
+        source_mode = "대학정보공시 OpenAPI · 직접조회"
+
     region_reason = ""
-    if plan.get("region_scope"):
+    if not data.empty and plan.get("region_scope"):
         schools, region_reason = resolve_region(
             plan["region_scope"],
             data["schlNm"].dropna().astype(str).tolist(),
@@ -103,7 +112,14 @@ def ask(question: str, history: list[dict]) -> dict:
     display_df = format_display_df(result)
 
     if result.empty:
-        answer = "현재 대학정보공시 API에서 질문 조건에 맞는 데이터를 확인하지 못했습니다."
+        if supabase_store.is_configured():
+            missing_years = ", ".join(str(y) for y in years)
+            answer = (
+                f"Supabase 저장본에서 요청한 연도({missing_years})의 조건에 맞는 데이터를 확인하지 못했습니다. "
+                "관리자 동기화에서 해당 연도를 먼저 수집해 주세요."
+            )
+        else:
+            answer = "현재 대학정보공시 API에서 질문 조건에 맞는 데이터를 확인하지 못했습니다."
     else:
         answer = stats_answer(
             question,
@@ -115,7 +131,7 @@ def ask(question: str, history: list[dict]) -> dict:
 
     return {
         "answer": answer,
-        "source_mode": "대학정보공시 OpenAPI",
+        "source_mode": source_mode,
         "plan": plan,
         "data": display_df.to_dict(orient="records"),
         "raw_data": result.where(result.notna(), None).to_dict(orient="records"),
