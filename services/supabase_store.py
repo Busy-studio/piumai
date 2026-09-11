@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Iterable
+from urllib.parse import urlsplit, urlunsplit
 
 import pandas as pd
 import requests
@@ -64,10 +65,24 @@ def is_configured() -> bool:
 
 
 def _base_url() -> str:
-    url = (get_secret("SUPABASE_URL") or "").rstrip("/")
-    if not url:
+    """Return only the Supabase project origin.
+
+    Accepts either the project URL (https://<ref>.supabase.co) or a Data API URL
+    accidentally copied with /rest/v1 appended. This prevents paths such as
+    /rest/v1/rest/v1/<table>, which PostgREST rejects with PGRST125.
+    """
+    raw = (get_secret("SUPABASE_URL") or "").strip()
+    if not raw:
         raise ValueError("SUPABASE_URL이 설정되지 않았습니다.")
-    return url
+
+    if not raw.startswith(("http://", "https://")):
+        raw = "https://" + raw
+
+    parts = urlsplit(raw)
+    if not parts.netloc:
+        raise ValueError("SUPABASE_URL 형식이 올바르지 않습니다.")
+
+    return urlunsplit((parts.scheme or "https", parts.netloc, "", "", "")).rstrip("/")
 
 
 def _key() -> str:
