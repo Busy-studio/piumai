@@ -69,18 +69,30 @@ def _api_key_for_url(url: str) -> tuple[str, str, str]:
     return api_key, "EDMGR_API_KEY", label
 
 
-def _post_once(url: str, payload: dict, content_mode: str = "json") -> requests.Response:
-    api_key, _, _ = _api_key_for_url(url)
-    auth_mode = str(EDMGR_AUTH_MODE or "header").lower().strip()
-    if auth_mode not in {"header", "body", "both"}:
-        auth_mode = "header"
+def _api_id_for_url(url: str) -> str:
+    if "SA00202500062" in url:
+        return "SA00202500062"
+    if "SA00202500061" in url:
+        return "SA00202500061"
+    raise ValueError(f"지원하지 않는 교육행정데이터 OpenAPI URL입니다: {url}")
 
-    headers = {"Accept": "application/json"}
-    body = dict(payload)
-    if auth_mode in {"header", "both"}:
-        headers["API_KEY"] = api_key
-    if auth_mode in {"body", "both"}:
-        body["userApiAthkCn"] = api_key
+
+def _post_once(url: str, search_params: dict, content_mode: str = "json") -> requests.Response:
+    api_key, _, _ = _api_key_for_url(url)
+    api_id = _api_id_for_url(url)
+
+    # 교육행정데이터 통합관리시스템 사업단 안내(2026-09):
+    # Header: API_KEY
+    # Body: apiId, userApiAthkCn, srhParam
+    headers = {
+        "Accept": "application/json",
+        "API_KEY": api_key,
+    }
+    body = {
+        "apiId": api_id,
+        "userApiAthkCn": api_key,
+        "srhParam": dict(search_params),
+    }
 
     if content_mode == "json":
         headers["Content-Type"] = "application/json"
@@ -134,11 +146,11 @@ def _call_edmgr_cached(url: str, year: int, expected_keys: tuple[str, ...]):
     _, secret_name, label = _api_key_for_url(url)
 
     resp = _post_once(url, payload, "json")
-    attempts = [f"{str(EDMGR_AUTH_MODE or 'header').lower()}/json:{resp.status_code}"]
+    attempts = [f"header+body/json:{resp.status_code}"]
 
     if resp.status_code in {400, 405, 415, 422}:
         form_resp = _post_once(url, payload, "form")
-        attempts.append(f"{str(EDMGR_AUTH_MODE or 'header').lower()}/form:{form_resp.status_code}")
+        attempts.append(f"header+body/form:{form_resp.status_code}")
         if form_resp.ok:
             resp = form_resp
 
