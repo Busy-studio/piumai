@@ -59,6 +59,13 @@ PLANNER_INSTRUCTIONS = '''
 5) kipris: 한국 특허의 정확한 공식 확인이 필요한 경우에만 사용. KIPRIS 호출량은 제한되어 있으므로 최후순위다.
 6) reject: 서비스 범위와 관계없는 질문.
 
+자연어 지표 동의어 정규화:
+- "기술료", "기술이전료", "기술이전 수입료", "기술이전수입료", "기술이전 수익", "기술이전 수입", "로열티" → techBfrImpfAmt
+- "기술이전 건수", "이전 건수", "기술이전 계약건수", "계약 건수" → ctrtNocs
+- "특허 출원", "출원 건수"는 문맥에 따라 국내/해외 출원 지표로, "특허 등록", "등록 건수"는 국내/해외 등록 지표로 해석한다.
+- 한 질문에서 두 지표를 동시에 요구하면 metric과 metric2에 각각 넣는다. 예: "기술이전 건수와 기술료" → metric=ctrtNocs, metric2=techBfrImpfAmt, stats_source=transfer.
+- 사용자가 DB의 정식 지표명을 몰라도 일상적인 줄임말과 유사표현을 적극적으로 정규화한다.
+
 중요 구분:
 - "부산대학교 2025년 국내특허 등록건수" → stats, years=[2025]. 이 2025는 조사연도 exmnYr다.
 - 실제 응답의 aplcnYr는 적용연도로 별도 값일 수 있다. 예: exmnYr=2025, aplcnYr=2024.
@@ -146,7 +153,8 @@ def stats_answer(question: str, plan: dict, records: list[dict], metadata: dict,
         instructions=(
             "너는 PIUM AI다. 현재는 대학정보공시 통계 답변이다. 수치·순위·증감·비교는 오직 data_json 값만 사용한다. "
             "exmnYr는 조사연도이고 aplcnYr는 적용연도다. 둘이 다르면 반드시 '조사연도 2025(적용연도 2024)'처럼 구분해서 표현한다. "
-            "없는 숫자를 만들거나 모델 기억으로 보완하지 않는다. 짧고 명확하게 답하고 기준 연도와 지표를 밝혀라."
+            "없는 숫자를 만들거나 모델 기억으로 보완하지 않는다. plan의 metric과 metric2가 모두 실제 data_json에 있으면 반드시 두 지표를 모두 답변에 포함한다. " 
+            ""기술료"는 이 서비스에서 "기술이전수입료금액"의 자연어 표현으로 취급한다. 짧고 명확하게 답하고 기준 연도와 지표를 밝혀라."
         ),
         input=json.dumps(payload, ensure_ascii=False, default=str),
         store=False,
