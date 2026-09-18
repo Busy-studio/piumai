@@ -31,7 +31,7 @@ def get_bool_secret(name: str, default: bool = False) -> bool:
     return str(raw).strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
-OPENAI_MODEL = get_secret("OPENAI_MODEL", "gpt-5.6-luna")
+OPENAI_MODEL = get_secret("OPENAI_MODEL", "gpt-5.6-terra")
 TRANSCRIBE_MODEL = get_secret("OPENAI_TRANSCRIBE_MODEL", "gpt-4o-mini-transcribe")
 TTS_MODEL = get_secret("OPENAI_TTS_MODEL", "gpt-4o-mini-tts")
 TTS_VOICE = get_secret("OPENAI_TTS_VOICE", "coral")
