@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 from io import BytesIO
 import json
+import html
 
 import pandas as pd
 import streamlit as st
@@ -36,6 +37,9 @@ st.markdown(
 .pium-sub {opacity: .72; margin-bottom: 1.2rem;}
 .source-chip {display:inline-block; padding:.20rem .55rem; margin-top:.4rem; border:1px solid rgba(128,128,128,.28); border-radius:999px; font-size:.78rem; opacity:.82;}
 .voice-help {font-size:.82rem; opacity:.7; margin-top:-.4rem; margin-bottom:.5rem;}
+.user-row {display:flex; justify-content:flex-end; width:100%; margin:.45rem 0 .7rem 0;}
+.user-bubble {display:inline-block; max-width:78%; padding:.72rem 1rem; border-radius:18px 18px 4px 18px; background:#f1f3f5; line-height:1.5; overflow-wrap:anywhere;}
+.assistant-wrap {display:flex; justify-content:flex-start; width:100%;}
 @media (max-width: 640px) {
   .block-container {padding: .8rem .75rem 6.5rem .75rem;}
   .pium-title {font-size: 1.55rem;}
@@ -155,8 +159,15 @@ def render_chart(message: dict):
 
 def render_message(message: dict, index: int):
     role = message.get("role", "assistant")
-    avatar = "🌱" if role == "assistant" else "👤"
-    with st.chat_message(role, avatar=avatar):
+    if role == "user":
+        content = html.escape(str(message.get("content", ""))).replace("\n", "<br>")
+        st.markdown(
+            f'<div class="user-row"><div class="user-bubble">{content}</div></div>',
+            unsafe_allow_html=True,
+        )
+        return
+
+    with st.chat_message("assistant", avatar="🌱"):
         st.markdown(message.get("content", ""))
         if role == "assistant":
             mode = message.get("source_mode")
