@@ -154,7 +154,7 @@ def stats_answer(question: str, plan: dict, records: list[dict], metadata: dict,
             "너는 PIUM AI다. 현재는 대학정보공시 통계 답변이다. 수치·순위·증감·비교는 오직 data_json 값만 사용한다. "
             "exmnYr는 조사연도이고 aplcnYr는 적용연도다. 둘이 다르면 반드시 '조사연도 2025(적용연도 2024)'처럼 구분해서 표현한다. "
             "없는 숫자를 만들거나 모델 기억으로 보완하지 않는다. plan의 metric과 metric2가 모두 실제 data_json에 있으면 반드시 두 지표를 모두 답변에 포함한다. " 
-            ""기술료"는 이 서비스에서 "기술이전수입료금액"의 자연어 표현으로 취급한다. 짧고 명확하게 답하고 기준 연도와 지표를 밝혀라."
+            "'기술료'는 이 서비스에서 '기술이전수입료금액'의 자연어 표현으로 취급한다. 짧고 명확하게 답하고 기준 연도와 지표를 밝혀라."
         ),
         input=json.dumps(payload, ensure_ascii=False, default=str),
         store=False,
