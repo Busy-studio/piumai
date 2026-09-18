@@ -29,7 +29,7 @@ def ask(question: str, history: list[dict]) -> dict:
     if route == "knowledge":
         return {
             "answer": knowledge_answer(question, history),
-            "source_mode": "Luna",
+            "source_mode": "GPT-5.6 Terra",
             "plan": plan,
         }
 
